@@ -1,20 +1,17 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-
 import model
 import utils
 import argparse
 import logging
 
-
 args = argparse.ArgumentParser(description="TASTGCN")
-args.add_argument("--dataset", default="PEMS03")
+args.add_argument("--dataset", default="PEMS03",help="")
 args.add_argument("--num_input", type=int, default=12)
 args.add_argument("--num_output", type=int, default=12)
 args.add_argument("--epochs", type=int, default=50)
-args.add_argument("--batch_size", type=int, default=8)
+args.add_argument("--batch_size", type=int, default=16)
 args.add_argument("--device", type=str, default="cuda:0")
 args.add_argument("--seed", type=int, default=7)
 args.add_argument("--max_speed", type=int, default=120)
@@ -27,7 +24,10 @@ args.add_argument("--week_emb_dim", type=int, default=32)
 args.add_argument("--learning_rate", type=float, default=1e-3)
 args = args.parse_args()
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s' 
+)
 log = logging.getLogger(__name__)
 
 def train(training_input, training_target, batch_size):
@@ -66,16 +66,14 @@ def validate(val_input, val_target):
         output = net(X_batch_val, A,  S, V)
         val_loss = loss_criterion(output, Y_batch_val).to(device="cpu")
         temp_validation_losses.append(val_loss.detach().numpy().item())
-
-
         out_unnormalized = output.detach().cpu().numpy() * stds[0] + means[0]
         target_unnormalized = Y_batch_val.detach().cpu().numpy() * stds[0] + means[0]
         mae = np.mean(np.absolute(out_unnormalized - target_unnormalized))
         temp_validation_maes.append(mae)
-        mse = np.mean((out_unnormalized - target_unnormalized) ** 2)  # 计算均方误差
-        rmse = np.sqrt(mse)  # 计算均方根误差
-        temp_validation_rmses.append(rmse)  # 将 RMSE 添加到列表中
-        epsilon = 0.5
+        mse = np.mean((out_unnormalized - target_unnormalized) ** 2)
+        rmse = np.sqrt(mse)
+        temp_validation_rmses.append(rmse)
+        epsilon = 0.1
         absolute_percentage_error = np.abs(
             (out_unnormalized - target_unnormalized) / (np.abs(target_unnormalized) + epsilon)
         )
@@ -101,8 +99,6 @@ def test(test_input, test_target):
         X_batch_test = X_batch_test.to(device=args.device)
         Y_batch_test = Y_batch_test.to(device=args.device)
         output = net(X_batch_test, A, S, V)
-
-        # 计算 MAE, RMSE, MAPE
         out_unnormalized = output.detach().cpu().numpy() * stds[0] + means[0]
         target_unnormalized = Y_batch_test.detach().cpu().numpy() * stds[0] + means[0]
         mae = np.mean(np.absolute(out_unnormalized - target_unnormalized))
@@ -110,7 +106,7 @@ def test(test_input, test_target):
         mse = np.mean((out_unnormalized - target_unnormalized) ** 2)
         rmse = np.sqrt(mse)
         test_rmses.append(rmse)
-        epsilon = 1.0
+        epsilon = 0.1
         absolute_percentage_error = np.abs(
             (out_unnormalized - target_unnormalized) / (np.abs(target_unnormalized) + epsilon)
         )
@@ -139,11 +135,9 @@ if __name__ == '__main__':
     test_input, test_target = utils.generate_dataset(test_original_data,
                                                      num_timesteps_input=args.num_input,
                                                      num_timesteps_output=args.num_output)
-    log.info("数据预处理完成")
-
+    log.info("Data preprocessing is completed")
     net = model.TASTGCN(args,A.size(0))
     net = net.to(device=args.device)
-    # 创建一个Adam优化器，用于优化模型的参数
     optimizer = torch.optim.Adam(net.parameters(), lr=args.learning_rate)
     loss_criterion = nn.L1Loss()
     loss_criterion = loss_criterion.to(device=args.device)
@@ -157,13 +151,12 @@ if __name__ == '__main__':
     best_test_rmse = 999
     best_test_mape = 999
     for epoch in range(args.epochs):
-        print("第", epoch+1, "次训练开始:")
+        # log.info(f"Epoch {epoch + 1} training starts:")
         loss= train(training_input, training_target,batch_size =  args.batch_size)
         training_losses.append(loss)
         with torch.no_grad():
             temp_validation_losses,temp_validation_maes,temp_validation_rmses,temp_validation_mapes = validate(val_input,val_target)
             out = None
-        # 计算整个验证集的平均损失和MAE
         avg_val_loss = np.mean(temp_validation_losses)
         avg_val_mae = np.mean(temp_validation_maes)
         avg_val_rmse = np.mean(temp_validation_rmses)
@@ -174,17 +167,8 @@ if __name__ == '__main__':
         validation_rmses.append(avg_val_rmse)
         validation_mapes.append(avg_val_mape)
 
-        print("Training loss: {}".format(training_losses[-1]))
-        print("Validation loss: {}".format(validation_losses[-1]))
-        print("Validation MAE: {}".format(validation_maes[-1]))
-        print("Validation RMSE: {}".format(validation_rmses[-1]))
-        print("Validation MAPE: {}".format(validation_mapes[-1]))
-        plt.plot(training_losses, label="training loss")
-        plt.plot(validation_losses, label="validation loss")
-        plt.plot(validation_maes, label="validation MAE")
-        plt.plot(validation_rmses, label="validation RMSE")
-        plt.legend()
-        plt.show()
+        log.info(f"Epoch {epoch + 1} : Validation MAE: {validation_maes[-1]:.4f}, Validation RMSE: {validation_rmses[-1]:.4f}, "
+                 f"Validation MAPE: {validation_mapes[-1]:.4f}")
 
         with torch.no_grad():
             test_maes, test_rmses, test_mapes = test(test_input, test_target)
@@ -192,13 +176,8 @@ if __name__ == '__main__':
             avg_test_rmse = np.mean(test_rmses)
             avg_test_mape = np.mean(test_mapes)
             if(avg_test_mae<best_test_mae):
-                print(f"Test MAE: {avg_test_mae:.4f}")
-                print(f"Test RMSE: {avg_test_rmse:.4f}")
-                print(f"Test MAPE: {avg_test_mape:.2f}%")
+                log.info(f"Test MAE: {avg_test_mae:.4f}, Test RMSE: {avg_test_rmse:.4f}, Test MAPE: {avg_test_mape:.2f}%")
                 best_test_mae = avg_test_mae
                 best_test_rmse = avg_test_rmse
                 best_test_mape = avg_test_mape
-    print("Best test result: ")
-    print(f"Test MAE: {best_test_mae:.4f}")
-    print(f"Test RMSE: {best_test_rmse:.4f}")
-    print(f"Test MAPE: {best_test_mape:.2f}%")
+    log.info(f"Best test result: MAE: {best_test_mae:.4f}, RMSE: {best_test_rmse:.4f}, MAPE: {best_test_mape:.2f}%")
