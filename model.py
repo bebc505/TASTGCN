@@ -92,8 +92,8 @@ class TASTGC(nn.Module):
         V_mps = (V * 1000 / 3600).to(self.device)
         T = S / V_mps
         alpha = torch.clamp(1 - T / delta_t, min=0, max=1).to(self.device)
-        alpha = alpha * mask + temp / 2
-        beta = (1 - alpha) * mask + temp / 2
+        alpha = alpha
+        beta = 1 - alpha
         X = X.permute(1, 0, 2, 3)
         X_forward = torch.cat([X[:, :, 0:1, :], X[:, :, :-1, :]], dim=2)
         X.to(dtype=torch.float32, device=self.device)
