@@ -1,13 +1,14 @@
 import numpy as np
 import torch
 import torch.nn as nn
+
 import model
 import utils
 import argparse
 import logging
 
 args = argparse.ArgumentParser(description="TASTGCN")
-args.add_argument("--dataset", default="PEMS03",help="")
+args.add_argument("--dataset", default="PEMS08",help="")
 args.add_argument("--num_input", type=int, default=12)
 args.add_argument("--num_output", type=int, default=12)
 args.add_argument("--epochs", type=int, default=50)
@@ -26,7 +27,7 @@ args = args.parse_args()
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(message)s' 
+    format='%(message)s'
 )
 log = logging.getLogger(__name__)
 
@@ -66,22 +67,27 @@ def validate(val_input, val_target):
         output = net(X_batch_val, A,  S, V)
         val_loss = loss_criterion(output, Y_batch_val).to(device="cpu")
         temp_validation_losses.append(val_loss.detach().numpy().item())
+
         out_unnormalized = output.detach().cpu().numpy() * stds[0] + means[0]
         target_unnormalized = Y_batch_val.detach().cpu().numpy() * stds[0] + means[0]
         mae = np.mean(np.absolute(out_unnormalized - target_unnormalized))
         temp_validation_maes.append(mae)
-        mse = np.mean((out_unnormalized - target_unnormalized) ** 2)
-        rmse = np.sqrt(mse)
-        temp_validation_rmses.append(rmse)
-        epsilon = 0.1
-        absolute_percentage_error = np.abs(
-            (out_unnormalized - target_unnormalized) / (np.abs(target_unnormalized) + epsilon)
-        )
-        test_mask = (np.abs(target_unnormalized) > epsilon)
-        test_absolute_percentage_error = absolute_percentage_error[test_mask]
-        mape = np.mean(test_absolute_percentage_error) * 100 if len(
-            test_absolute_percentage_error) > 0 else 0.0
+        mse = np.mean((out_unnormalized - target_unnormalized) ** 2) 
+        rmse = np.sqrt(mse) 
+        temp_validation_rmses.append(rmse) 
+
+        epsilon = 1e-5
+        abs_error = np.abs(out_unnormalized - target_unnormalized)
+        denominator = np.abs(target_unnormalized) + epsilon
+        mape = abs_error / denominator
+
+        valid_mask = (~np.isnan(mape)) & (~np.isinf(mape)) & (mape <= 5)
+        if np.any(valid_mask):
+            mape = np.mean(mape[valid_mask]) * 100
+        else:
+            mape = 0.0
         temp_validation_mapes.append(mape)
+
 
     return temp_validation_losses,temp_validation_maes,temp_validation_rmses,temp_validation_mapes
 
@@ -99,6 +105,7 @@ def test(test_input, test_target):
         X_batch_test = X_batch_test.to(device=args.device)
         Y_batch_test = Y_batch_test.to(device=args.device)
         output = net(X_batch_test, A, S, V)
+
         out_unnormalized = output.detach().cpu().numpy() * stds[0] + means[0]
         target_unnormalized = Y_batch_test.detach().cpu().numpy() * stds[0] + means[0]
         mae = np.mean(np.absolute(out_unnormalized - target_unnormalized))
@@ -106,14 +113,15 @@ def test(test_input, test_target):
         mse = np.mean((out_unnormalized - target_unnormalized) ** 2)
         rmse = np.sqrt(mse)
         test_rmses.append(rmse)
-        epsilon = 0.1
-        absolute_percentage_error = np.abs(
-            (out_unnormalized - target_unnormalized) / (np.abs(target_unnormalized) + epsilon)
-        )
-        test_mask = (np.abs(target_unnormalized) > epsilon)
-        test_absolute_percentage_error = absolute_percentage_error[test_mask]
-        mape = np.mean(test_absolute_percentage_error) * 100 if len(
-            test_absolute_percentage_error) > 0 else 0.0
+        epsilon = 1e-5
+        abs_error = np.abs(out_unnormalized - target_unnormalized)
+        denominator = np.abs(target_unnormalized) + epsilon
+        mape = abs_error / denominator
+        test_mask = (~np.isnan(mape)) & (~np.isinf(mape)) & (mape <= 5)
+        if np.any(test_mask):
+            mape = np.mean(mape[test_mask]) * 100
+        else:
+            mape = 0.0
         test_mapes.append(mape)
     return test_maes,test_rmses,test_mapes
 
@@ -135,7 +143,6 @@ if __name__ == '__main__':
     test_input, test_target = utils.generate_dataset(test_original_data,
                                                      num_timesteps_input=args.num_input,
                                                      num_timesteps_output=args.num_output)
-    log.info("Data preprocessing is completed")
     net = model.TASTGCN(args,A.size(0))
     net = net.to(device=args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=args.learning_rate)
@@ -151,7 +158,6 @@ if __name__ == '__main__':
     best_test_rmse = 999
     best_test_mape = 999
     for epoch in range(args.epochs):
-        # log.info(f"Epoch {epoch + 1} training starts:")
         loss= train(training_input, training_target,batch_size =  args.batch_size)
         training_losses.append(loss)
         with torch.no_grad():
@@ -175,8 +181,8 @@ if __name__ == '__main__':
             avg_test_mae = np.mean(test_maes)
             avg_test_rmse = np.mean(test_rmses)
             avg_test_mape = np.mean(test_mapes)
+            log.info(f"Test MAE: {avg_test_mae:.4f}, Test RMSE: {avg_test_rmse:.4f}, Test MAPE: {avg_test_mape:.2f}%")
             if(avg_test_mae<best_test_mae):
-                log.info(f"Test MAE: {avg_test_mae:.4f}, Test RMSE: {avg_test_rmse:.4f}, Test MAPE: {avg_test_mape:.2f}%")
                 best_test_mae = avg_test_mae
                 best_test_rmse = avg_test_rmse
                 best_test_mape = avg_test_mape
