@@ -5,20 +5,21 @@ import torch.nn.functional as F
 import numpy as np
 import utils
 from math import sqrt
-from masking import ProbMask
+from masking import  ProbMask
+
 
 class InfoEmb(nn.Module):
     def __init__(self, space_emb_dim, day_emb_dim, week_emb_dim, node_num, device, num_input):
         super(InfoEmb, self).__init__()
-        self.spaceInfo = nn.Parameter(
-            torch.empty(node_num, space_emb_dim))
-        nn.init.xavier_uniform_(self.spaceInfo)
-        self.dayInfo = nn.Parameter(
-            torch.empty(288, day_emb_dim))
-        nn.init.xavier_uniform_(self.dayInfo)
-        self.weekInfo = nn.Parameter(
-            torch.empty(7, week_emb_dim))
-        nn.init.xavier_uniform_(self.weekInfo)
+        self.spatial_emb = nn.Parameter(torch.empty(node_num, space_emb_dim))
+        nn.init.xavier_uniform_(self.spatial_emb)
+
+        self.daily_emb = nn.Parameter(torch.empty(288, day_emb_dim))
+        nn.init.xavier_uniform_(self.daily_emb)
+
+        self.weekly_emb = nn.Parameter(torch.empty(7, week_emb_dim))
+        nn.init.xavier_uniform_(self.weekly_emb)
+
         self.node_num = node_num
         self.num_input = num_input
         self.space_emb_dim = space_emb_dim
@@ -26,48 +27,50 @@ class InfoEmb(nn.Module):
         self.week_emb_dim = week_emb_dim
         self.device = device
 
-    def forward(self, X):
-        day_indices = X[..., 1]
-        week_indices = X[..., 2]
-        # space identify information embedding
-        spaceInfo_expend = self.spaceInfo.unsqueeze(0).unsqueeze(2).expand(X.shape[0], self.node_num, self.num_input
-                                                                           , self.space_emb_dim).to(self.device)
-        X = torch.cat((X[..., :1], spaceInfo_expend), dim=-1)
+    def forward(self, x):
+        day_indices = x[..., 1]
+        week_indices = x[..., 2]
 
-        # day identify information embedding
-        day_values = self.dayInfo[day_indices.long()]
-        X = torch.cat((X[..., :(1 + self.space_emb_dim)], day_values), dim=-1)
+        spatial_expanded = self.spatial_emb.unsqueeze(0).unsqueeze(2).expand(
+            x.shape[0], self.node_num, self.num_input, self.space_emb_dim).to(self.device)
+        x = torch.cat((x[..., :1], spatial_expanded), dim=-1)
 
-        # week identify information embedding
-        week_values = self.weekInfo[week_indices.long()]
-        X = torch.cat((X[..., :(1 + self.space_emb_dim + self.day_emb_dim)], week_values), dim=-1)
-        return X
+        daily_values = self.daily_emb[day_indices.long()]
+        x = torch.cat((x[..., :(1 + self.space_emb_dim)], daily_values), dim=-1)
+
+        weekly_values = self.weekly_emb[week_indices.long()]
+        x = torch.cat((x[..., :(1 + self.space_emb_dim + self.day_emb_dim)], weekly_values), dim=-1)
+
+        return x
 
 
 class DSFIN(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding):
         super(DSFIN, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels * 2, (1, kernel_size), padding=(0, padding))
-        self.conv2 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.conv3 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.conv4 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.conv5 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.conv6 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.conv7 = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
-        self.leaner = nn.Linear(out_channels * 2, out_channels)
+        self.initial_conv = nn.Conv2d(in_channels, out_channels * 2, (1, kernel_size), padding=(0, padding))
+        self.path1_conv_main = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
+        self.path1_conv_gate = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
+        self.path2_conv_main = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
+        self.path2_conv_gate = nn.Conv2d(out_channels, out_channels, (1, kernel_size), padding=(0, padding))
+        self.fusion_fc = nn.Linear(out_channels * 2, out_channels)
 
-    def forward(self, X):
-        X = self.conv1(X)
-        N = round(X.shape[1] / 2)
-        X1 = X[:, :N, :, :]
-        X2 = X[:, N:, :, :]
-        X3 = self.conv2(X1) * torch.sigmoid(self.conv4(X1))
-        X4 = self.conv3(X2) * torch.sigmoid(self.conv5(X2))
-        XA = torch.cat((X3, X4), dim=1)
-        output = F.relu(XA + X)
-        output = output.permute(0, 2, 3, 1)
-        output = self.leaner(output)
-        return output
+    def forward(self, x):
+        x_initial = self.initial_conv(x)
+        channels_half = round(x_initial.shape[1] / 2)
+
+        x_path1 = x_initial[:, :channels_half, :, :]
+        x_path2 = x_initial[:, channels_half:, :, :]
+
+        x_path1_out = self.path1_conv_main(x_path1) * torch.sigmoid(self.path1_conv_gate(x_path1))
+        x_path2_out = self.path2_conv_main(x_path2) * torch.sigmoid(self.path2_conv_gate(x_path2))
+
+        x_fused = torch.cat((x_path1_out, x_path2_out), dim=1)
+        x_out = F.relu(x_fused + x_initial)
+
+        x_out = x_out.permute(0, 2, 3, 1)
+        x_out = self.fusion_fc(x_out)
+
+        return x_out
 
 
 class TASTGC(nn.Module):
@@ -88,25 +91,33 @@ class TASTGC(nn.Module):
         mask = torch.zeros(A.shape, dtype=torch.float32, device=self.device)
         mask[A != 0] = 1
         delta_t = 300
-        temp = torch.eye(self.node_num).to(self.device)
         V_mps = (V * 1000 / 3600).to(self.device)
+
         T = S / V_mps
+
         alpha = torch.clamp(1 - T / delta_t, min=0, max=1).to(self.device)
         alpha = alpha
         beta = 1 - alpha
+
         X = X.permute(1, 0, 2, 3)
         X_forward = torch.cat([X[:, :, 0:1, :], X[:, :, :-1, :]], dim=2)
+
         X.to(dtype=torch.float32, device=self.device)
         X_forward.to(dtype=torch.float32, device=self.device)
+
         M = torch.zeros((self.node_num, self.node_num * 2)).to(device=self.device)
         M[:self.node_num, :self.node_num] = (alpha + self.weightMatrix) * mask
         M[:self.node_num, self.node_num:] = (beta + self.weightMatrix2) * mask
+        a1 = (alpha + self.weightMatrix) * mask
+        b1 = (beta + self.weightMatrix2) * mask
+
         A_expand = torch.zeros((self.node_num, self.node_num * 2)).to(device=self.device)
         A_expand[:self.node_num, :self.node_num] = A
         A_expand[:self.node_num, self.node_num:] = A
+
         A = A_expand * M
-        X_Concat = torch.cat((X, X_forward), dim=0)
-        result = torch.einsum('ij,jkmn->ikmn', A, X_Concat)
+        X_two = torch.cat((X, X_forward), dim=0)
+        result = torch.einsum('ij,jkmn->ikmn', A, X_two)
         lfs = torch.einsum("ijlm->jilm", result)
         output = F.relu(torch.matmul(lfs, self.weight))
         output = output.permute(0, 3, 1, 2)
@@ -114,7 +125,7 @@ class TASTGC(nn.Module):
 
 
 class TemporalPreprocess(nn.Module):
-    def __init__(self, seq_length, d_model, kernel_size=3):
+    def __init__(self, d_model, kernel_size=3):
         super().__init__()
         self.conv = nn.Conv1d(
             in_channels=d_model,
@@ -208,8 +219,7 @@ class ProbAttention(nn.Module):
         self.output_attention = output_attention
         self.dropout = nn.Dropout(attention_dropout)
 
-    def _prob_QK(self, Q, K, sample_k, n_top):
-
+    def _prob_QK(self, Q, K, sample_k, n_top):  # n_top: c*ln(L_q)
         B, H, L_K, E = K.shape
         _, _, L_Q, _ = Q.shape
 
@@ -279,21 +289,24 @@ class ProbAttention(nn.Module):
         scale = self.scale or 1. / sqrt(D)
         if scale is not None:
             scores_top = scores_top * scale
+
         context = self._get_initial_context(values, L_Q)
+
         context, attn = self._update_context(context, values, scores_top, index, L_Q, attn_mask)
 
         return context.transpose(2, 1).contiguous(), attn
 
 
 class GLU(nn.Module):
-    def __init__(self, dim, **kwargs):
-        super(GLU, self).__init__(**kwargs)
+    def __init__(self, dim):
+        super(GLU, self).__init__()
         self.linear = nn.Conv2d(in_channels=dim, out_channels=dim * 2, kernel_size=(1, 1))
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.linear(x)
         lhs, rhs = torch.chunk(x, chunks=2, dim=1)
-        return lhs * F.sigmoid(rhs)
+        return lhs * self.sigmoid(rhs)
 
 
 class GFS(nn.Module):
@@ -316,15 +329,15 @@ class CongestionLearn(nn.Module):
             nn.ReLU()
         )
         self.sig = nn.Sigmoid()
-        
-    def forward(self, flowR):
-        flowR = flowR.reshape(flowR.shape[0], flowR.shape[1], -1)
-        flowR = self.time_fusion(flowR)
-        flowR = flowR.mean(dim=0)
-        flowRT = flowR.permute(1, 0)
-        flowR = (flowR + flowRT) / 2
-        flowR = self.sig(flowR)
-        return flowR
+    def forward(self, flow):
+        flow = flow.reshape(flow.shape[0], flow.shape[1], -1)
+        flow = self.time_fusion(flow)
+        flow_mean = flow.mean(dim=0)
+        flow_mean_exchange = flow_mean.permute(1, 0)
+        flow_fuse = (flow_mean + flow_mean_exchange) / 2
+        flow_fuse = self.sig(flow_fuse)
+        return flow_fuse
+
 
 class TASTGCN(nn.Module):
     def __init__(self, args, node_num):
@@ -344,48 +357,61 @@ class TASTGCN(nn.Module):
         self.gfs = GFS(64, 64, args.device)
         self.lconv = nn.Conv2d(in_channels=1, out_channels=2, kernel_size=(1, 3), padding=(0, 1))
         self.cl = CongestionLearn(args.num_input)
-        self.preAddress = TemporalPreprocess(12, 12, 3)
+
+        self.preAddress = TemporalPreprocess(12, 3)
         self.encoder1 = EncoderLayer(
             AttentionLayer(
                 ProbAttention(False, attention_dropout=0.1, output_attention=False),
                 args.d_model, n_heads=4), args.d_model, args.d_ff, 0.1, activation="relu")
+
         self.encoder2 = EncoderLayer(
             AttentionLayer(
                 ProbAttention(False, attention_dropout=0.1, output_attention=False),
                 args.d_model, n_heads=4), args.d_model, args.d_ff, 0.1, activation="relu")
+
         self.fully = nn.Linear(in_features=args.num_output * 64, out_features=args.num_output)
 
     def forward(self, X, A, S, V):
         X = X.to(self.device)
-        flowR = X[..., :1]
-        x_flow, means, stdev = utils.get_normalized_flow(X)
-        x_flow = x_flow.to(self.device)
-        x_flow = self.preAddress(x_flow)
-        x_flow = x_flow.unsqueeze(1)
-        x_flow = self.lconv(x_flow)
-        x_flow1 = x_flow[:, :1, :, :].squeeze()
-        x_flow2 = x_flow[:, 1:, :, :].squeeze()
-        x_long_feature1, attn1 = self.encoder1(x_flow1, attn_mask=None, tau=None, delta=None)
-        x_long_feature2, attn2 = self.encoder2(x_flow2, attn_mask=None, tau=None, delta=None)
-        x_flow_restored1 = x_long_feature1.permute(0, 2, 1) * stdev + means
-        x_flow_restored2 = x_long_feature2.permute(0, 2, 1) * stdev + means
-        X = self.infoEmb(X)
-        rate = self.cl(flowR)
-        V = V * (1 - torch.log(1 + rate))
-        X = X.permute(0, 3, 1, 2)
-        X = self.dsfin1(X)
-        X = utils.concatenate_feature(x_flow_restored1, X)
-        X = self.tastgc1(X, A, S, V)
-        X = self.dsfin2(X)
-        X = self.batch_norm1(X)
-        X = X.permute(0, 3, 1, 2)
-        X = self.dsfin3(X)
-        X = utils.concatenate_feature(x_flow_restored2, X)
-        X = self.tastgc2(X, A, S, V)
-        X = self.dsfin4(X)
-        X = self.batch_norm2(X)
-        X = X.permute(0, 3, 1, 2)
-        X = self.gfs(X)
-        X = X.permute(0, 2, 3, 1)
-        X = self.fully(X.reshape((X.shape[0], X.shape[1], -1)))
-        return X
+        flow_raw = X[..., :1]
+
+        x_flow_norm, means, stdev = utils.get_normalized_flow(X)
+        x_flow_norm = x_flow_norm.to(self.device)
+        x_flow_processed = self.preAddress(x_flow_norm)
+        x_flow_processed = x_flow_processed.unsqueeze(1)
+        x_flow_conv = self.lconv(x_flow_processed)
+
+        x_flow_part1 = x_flow_conv[:, :1, :, :].squeeze()
+        x_flow_part2 = x_flow_conv[:, 1:, :, :].squeeze()
+
+        x_long_feat1, attn1 = self.encoder1(x_flow_part1, attn_mask=None, tau=None,
+                                            delta=None)
+        x_long_feat2, attn2 = self.encoder2(x_flow_part2, attn_mask=None, tau=None,
+                                            delta=None)
+
+        x_flow_restored1 = x_long_feat1.permute(0, 2, 1) * stdev + means
+        x_flow_restored2 = x_long_feat2.permute(0, 2, 1) * stdev + means
+
+        X_emb = self.infoEmb(X)
+        congestion_rate = self.cl(flow_raw)
+        V_adj = V * (1 - torch.log(1 + congestion_rate))
+
+        X_emb = X_emb.permute(0, 3, 1, 2)
+        X_dsfin1 = self.dsfin1(X_emb)
+        X_concat1 = utils.concatenate_feature(x_flow_restored1, X_dsfin1)
+        X_tastgc1 = self.tastgc1(X_concat1, A, S, V_adj)
+        X_dsfin2 = self.dsfin2(X_tastgc1)
+        X_bn1 = self.batch_norm1(X_dsfin2)
+
+        X_bn1 = X_bn1.permute(0, 3, 1, 2)
+        X_dsfin3 = self.dsfin3(X_bn1)
+        X_concat2 = utils.concatenate_feature(x_flow_restored2, X_dsfin3)
+        X_tastgc2 = self.tastgc2(X_concat2, A, S, V_adj)
+        X_dsfin4 = self.dsfin4(X_tastgc2)
+        X_bn2 = self.batch_norm2(X_dsfin4)
+
+        X_bn2 = X_bn2.permute(0, 3, 1, 2)
+        X_gfs = self.gfs(X_bn2)
+        X_gfs = X_gfs.permute(0, 2, 3, 1)
+        output = self.fully(X_gfs.reshape((X_gfs.shape[0], X_gfs.shape[1], -1)))
+        return output
