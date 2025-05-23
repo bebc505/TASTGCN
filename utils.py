@@ -96,3 +96,11 @@ def concatenate_feature(x_flow_restored, X):
     x_flow_restored = x_flow_restored.permute(0, 2, 1).unsqueeze(1)
     x_cat = torch.cat((x_flow_restored, X), dim=1)
     return x_cat.permute(0, 2, 3, 1)
+
+def compute_metrics(pred, target, threshold=5.0, epsilon=1e-5):
+    mae = np.mean(np.abs(pred - target))
+    rmse = np.sqrt(np.mean((pred - target) ** 2))
+    mape = np.abs(pred - target) / (np.abs(target) + epsilon)
+    valid_mask = (~np.isnan(mape)) & (~np.isinf(mape)) & (mape <= threshold)
+    mape = np.mean(mape[valid_mask]) * 100 if np.any(valid_mask) else 0.0
+    return mae, rmse, mape
