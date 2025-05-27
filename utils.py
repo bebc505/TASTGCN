@@ -27,6 +27,8 @@ def load_data(args):
     x_path = f"data/{args.dataset}/{args.dataset}.npz"
     A = pd.read_pickle(a_path)
     S = torch.from_numpy(A).to(device=args.device).to(dtype=torch.float32)
+    if args.dataset == "PEMS03" or args.dataset == "PEMS07":
+        S = S*1000
     X = np.load(x_path)
     A = normalize_adj_matrix(A)
     A = get_normalized_adj(A)
