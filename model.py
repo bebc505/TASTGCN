@@ -7,7 +7,6 @@ import utils
 from math import sqrt
 from masking import  ProbMask
 
-
 class InfoEmb(nn.Module):
     def __init__(self, space_emb_dim, day_emb_dim, week_emb_dim, node_num, device, num_input):
         super(InfoEmb, self).__init__()
